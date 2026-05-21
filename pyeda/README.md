@@ -7,7 +7,7 @@ Zero required dependencies. Drop it in, decorate your handlers, emit events.
 ```
 pip install pyeda[all]          # with YAML config + dashboard UI
 pip install pyeda               # core only (no extra deps)
-```
+``` 
 
 ---
 
