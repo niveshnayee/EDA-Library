@@ -1,0 +1,45 @@
+# pyeda.yml — Event Bus Configuration
+# Copy this file to your project root and adjust as needed.
+# All fields are optional; defaults are shown.
+
+bus:
+  # "memory" = pure asyncio.Queue (default, no extra deps)
+  # "sqlite" = durable journal; events survive process restart
+  backend: memory
+  queue_size: 1000
+  journal_path: .pyeda/journal.db   # only used when backend=sqlite
+
+ui:
+  enabled: true
+  host: 127.0.0.1
+  port: 7373       # open http://127.0.0.1:7373 in your browser
+
+# Default config applied to every handler unless overridden below
+defaults:
+  concurrency: 3           # max concurrent executions of this handler
+  retry_attempts: 3        # total attempts (1 = no retry)
+  retry_delay_s: 1.0       # base delay between retries
+  retry_backoff: exponential   # "fixed" or "exponential"
+  timeout_s: null          # null = no timeout; e.g. 30.0 for 30s
+
+middleware:
+  - logging    # structured log lines for every dispatch
+  - retry      # automatic retry with back-off
+
+# Per-handler overrides — key must match the Python function name
+handlers:
+  extract_audio:
+    concurrency: 2
+    retry_attempts: 5
+    timeout_s: 120.0
+
+  transcribe:
+    concurrency: 1      # whisper / faster-whisper is memory-heavy
+    retry_attempts: 3
+    timeout_s: 300.0
+
+  save_metadata:
+    concurrency: 5
+    retry_attempts: 5
+    retry_delay_s: 0.5
+    retry_backoff: exponential

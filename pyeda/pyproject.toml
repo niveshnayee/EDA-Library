@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "pyeda"
+version = "0.1.0"
+description = "Pure-Python in-process Event-Driven Architecture library"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["event-driven", "asyncio", "event-bus", "pubsub", "pipeline"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
+
+dependencies = []   # zero required runtime deps
+
+[project.optional-dependencies]
+yaml   = ["pyyaml>=6.0"]
+ui     = ["aiohttp>=3.9"]
+all    = ["pyyaml>=6.0", "aiohttp>=3.9"]
+dev    = ["pyyaml>=6.0", "aiohttp>=3.9", "pytest>=8", "pytest-asyncio>=0.23", "mypy>=1.9"]
+
+[project.scripts]
+pyeda = "pyeda.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pyeda*"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
