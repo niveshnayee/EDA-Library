@@ -14,9 +14,10 @@ Responsibilities:
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 from pyeda.config import PyEDAConfig, load_config
 from pyeda.exceptions import BusNotRunningError
@@ -62,6 +63,8 @@ class EventBus:
         # handler_key → queue (for shutdown)
         self._handler_queues: Dict[str, asyncio.Queue] = {} # type: ignore
         self._workers: List[asyncio.Task]        = []
+        # in-flight handler executions (kept so stop() can wait for them)
+        self._dispatch_tasks: Set[asyncio.Task]  = set()
         self._running: bool                      = False
         self._journal = None   # set in _setup_journal
 
@@ -161,9 +164,32 @@ class EventBus:
         finally:
             await self.stop()
 
-    async def stop(self) -> None:
-        """Gracefully drain queues and stop all workers."""
+    async def stop(self, timeout: Optional[float] = None) -> None:
+        """
+        Gracefully drain queues and stop all workers.
+
+        Waits for queued and running handlers (including any events they
+        emit) for up to ``timeout`` seconds, then cancels whatever is left.
+        Defaults to ``bus.shutdown_timeout_s`` from the config.
+        """
+        if not self._running:
+            return
         logger.info("pyeda: shutting down bus …")
+
+        if timeout is None:
+            timeout = self.config.bus.shutdown_timeout_s
+        try:
+            await asyncio.wait_for(self._drain(), timeout=timeout)
+        except asyncio.TimeoutError:
+            unfinished = [t for t in self._dispatch_tasks if not t.done()]
+            logger.warning(
+                "pyeda: shutdown timed out after %.1fs — cancelling %d unfinished handler(s).",
+                timeout, len(unfinished),
+            )
+            for t in unfinished:
+                t.cancel()
+            await asyncio.gather(*unfinished, return_exceptions=True)
+
         # Send one sentinel per per-handler queue
         for q in self._handler_queues.values():
             await q.put(_SENTINEL)
@@ -173,9 +199,27 @@ class EventBus:
 
         if self._journal:
             await self._journal.close()
+            self._journal = None
 
+        self._queues.clear()
+        self._handler_queues.clear()
+        self._workers.clear()
         self._running = False
         logger.info("pyeda: bus stopped.")
+
+    async def _drain(self) -> None:
+        """Wait until every queue is empty and no handler is executing."""
+        while True:
+            running = [t for t in self._dispatch_tasks if not t.done()]
+            if running:
+                await asyncio.wait(running)
+            elif (
+                any(not q.empty() for q in self._handler_queues.values())
+                and any(not w.done() for w in self._workers)
+            ):
+                await asyncio.sleep(0)   # let the workers pick the events up
+            else:
+                return
 
     # ------------------------------------------------------------------
     # Internal boot
@@ -264,10 +308,12 @@ class EventBus:
                 break
 
             event: BaseEvent = item
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self._dispatch(event, reg, middlewares),
                 name=f"pyeda.dispatch.{reg.name}.{event.event_id[:8]}",
             )
+            self._dispatch_tasks.add(task)
+            task.add_done_callback(self._dispatch_tasks.discard)
             q.task_done()
 
     def _build_middlewares(self, hcfg) -> list:
@@ -278,12 +324,13 @@ class EventBus:
         if "logging" in names:
             mw.append(logging_middleware)
 
+        if "retry" in names:
+            mw.append(make_retry_middleware(hcfg))
+
+        # Innermost, so the deadline applies to each attempt separately
         timeout_mw = make_timeout_middleware(hcfg.timeout_s)
         if timeout_mw:
             mw.append(timeout_mw)
-
-        if "retry" in names:
-            mw.append(make_retry_middleware(hcfg))
 
         return mw
 
@@ -294,6 +341,14 @@ class EventBus:
         middlewares: list,
     ) -> None:
         """Run one event through a handler's middleware pipeline."""
+        # Handlers subscribed to "dead.*" receive the original event, so the
+        # names differ.  Their outcome must not touch the journal or be
+        # dead-lettered again.
+        is_dead_letter = reg.event_name != event.name
+        # Private copy: the same event object is fanned out to every handler
+        # and the retry middleware updates ``attempt`` on it.
+        event = copy.copy(event)
+
         self.metrics.mark_active(reg.name, event.name, +1)
         start = time.perf_counter()
 
@@ -310,31 +365,43 @@ class EventBus:
             self.metrics.record(
                 event.name, reg.name, "success", duration_ms, event.attempt
             )
-            if self._journal:
+            if self._journal and not is_dead_letter:
                 await self._journal.mark_delivered(event.event_id)
 
         except Exception as exc:
             duration_ms = (time.perf_counter() - start) * 1000
             error_str = str(exc)
 
-            # Dead-letter
-            dead_event_name = f"dead.{event.name}"
             self.metrics.record(
                 event.name, reg.name, "dead_lettered", duration_ms,
                 event.attempt, error_str
             )
-            if self._journal:
-                await self._journal.mark_dead(event.event_id, error_str)
-
             logger.error(
                 "dead-letter event='%s' id=%s handler='%s' error=%s",
                 event.name, event.event_id[:8], reg.name, exc,
             )
+            if is_dead_letter:
+                return
 
-            # Emit to dead.* topic if anyone subscribed
-            dead_queues = self._queues.get(dead_event_name, [])
-            for dq in dead_queues:
-                await dq.put(event)
+            if self._journal:
+                await self._journal.mark_dead(event.event_id, error_str)
+
+            # Emit to dead.* topic if anyone subscribed, with the failure
+            # details attached under metadata["dead_letter"]
+            dead_queues = self._queues.get(f"dead.{event.name}", [])
+            if dead_queues:
+                dead_event = copy.copy(event)
+                dead_event.metadata = {
+                    **event.metadata,
+                    "dead_letter": {
+                        "handler":    reg.name,
+                        "error":      error_str,
+                        "error_type": type(exc).__name__,
+                        "attempts":   event.attempt + 1,
+                    },
+                }
+                for dq in dead_queues:
+                    await dq.put(dead_event)
 
         finally:
             self.metrics.mark_active(reg.name, event.name, -1)

@@ -168,7 +168,7 @@ Each worker does:
 
 1. read an event from its assigned queue
 2. if sentinel value is received, exit gracefully
-3. create a dispatch task for that event
+3. create a dispatch task for that event and keep a reference to it, so `stop()` can wait for it
 4. continue reading the next event
 
 The worker does not block while the handler runs.
@@ -189,7 +189,9 @@ Actual handler execution happens in `_dispatch()`:
 
 - When a handler raises after all retries, `EventBus` considers the event dead-lettered.
 - It records metrics with status `dead_lettered`.
-- It emits the same event to `dead.{event_name}` if any handler subscribes to that topic.
+- It emits a copy of the event to `dead.{event_name}` if any handler subscribes to that topic.
+- The copy carries the failure under `event.metadata["dead_letter"]`: `handler`, `error`, `error_type`, `attempts`.
+- A failing dead-letter handler is logged and counted, but not dead-lettered again.
 
 This allows users to monitor and handle poison events separately.
 
@@ -207,16 +209,16 @@ The library supports composable middleware. Built-in middleware includes:
   - retries handler execution on exception
   - supports fixed and exponential backoff
 - `make_timeout_middleware(timeout_s)`
-  - cancels a handler if it exceeds the configured timeout
+  - cancels a handler attempt if it exceeds the configured timeout
 
 ### Execution order
 
 The pipeline is built in order from outermost to innermost.
-For example, `[logging, timeout, retry]` means:
+The bus always builds it as `[logging, retry, timeout]`:
 
 1. logging wrapper enters
-2. timeout wrapper enters
-3. retry wrapper enters
+2. retry wrapper enters and sets `event.attempt`
+3. timeout wrapper enters, once per attempt
 4. actual handler runs
 
 The middleware is bound to each event and handler using `build_pipeline_with_context()`.
@@ -242,6 +244,7 @@ The library defines dataclasses:
   - `backend`: `memory` or `sqlite`
   - `queue_size`: queue capacity per handler
   - `journal_path`: path for SQLite journal
+  - `shutdown_timeout_s`: how long `stop()` waits for running handlers
 - `UIConfig`
   - `enabled`, `host`, `port`
 - `HandlerConfig`
@@ -252,7 +255,8 @@ The library defines dataclasses:
 ### Per-handler override
 
 A handler can override the defaults using the `handlers` mapping.
-This is merged in `PyEDAConfig.for_handler(name)`.
+Only the keys that are set are stored, and `PyEDAConfig.for_handler(name)` lays them over the defaults.
+An unknown key raises `ConfigError`.
 
 Examples:
 

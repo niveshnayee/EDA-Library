@@ -72,6 +72,7 @@ def make_retry_middleware(handler_cfg: "HandlerConfig") -> Middleware:
         backoff = handler_cfg.retry_backoff
 
         for attempt in range(max_attempts):
+            event.attempt = attempt
             try:
                 await call_next()
                 return

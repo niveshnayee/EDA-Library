@@ -8,9 +8,11 @@ All keys are optional; sensible defaults are applied.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
+
+from pyeda.exceptions import ConfigError
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +33,8 @@ class BusConfig:
     backend:      Literal["memory", "sqlite"] = "memory"
     queue_size:   int  = 1_000
     journal_path: str  = ".pyeda/journal.db"
+    # How long stop() waits for queued and running handlers; None = wait forever
+    shutdown_timeout_s: Optional[float] = 30.0
 
 
 @dataclass
@@ -46,21 +50,17 @@ class PyEDAConfig:
     ui:       UIConfig                    = field(default_factory=UIConfig)
     defaults: HandlerConfig               = field(default_factory=HandlerConfig)
     middleware: List[str]                 = field(default_factory=lambda: ["logging", "retry"])
-    handlers:   Dict[str, HandlerConfig]  = field(default_factory=dict)
+    # Per-handler overrides — only the keys that were explicitly set
+    handlers:   Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def for_handler(self, name: str) -> HandlerConfig:
         """Return handler-specific config merged over defaults."""
-        base = self.defaults
         override = self.handlers.get(name)
-        if override is None:
-            return base
-        return HandlerConfig(
-            concurrency    = override.concurrency    if override.concurrency    != 3      else base.concurrency,
-            retry_attempts = override.retry_attempts if override.retry_attempts != 3      else base.retry_attempts,
-            retry_delay_s  = override.retry_delay_s  if override.retry_delay_s  != 1.0   else base.retry_delay_s,
-            retry_backoff  = override.retry_backoff  if override.retry_backoff  != "exponential" else base.retry_backoff,
-            timeout_s      = override.timeout_s if override.timeout_s is not None else base.timeout_s,
-        )
+        if not override:
+            return self.defaults
+        if isinstance(override, HandlerConfig):
+            return override
+        return replace(self.defaults, **override)
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +123,7 @@ def _parse(raw: Dict[str, Any]) -> PyEDAConfig:
         backend      = bus_raw.get("backend",    "memory"),
         queue_size   = bus_raw.get("queue_size", 1_000),
         journal_path = bus_raw.get("journal_path", ".pyeda/journal.db"),
+        shutdown_timeout_s = bus_raw.get("shutdown_timeout_s", 30.0),
     )
 
     # --- ui ---
@@ -141,9 +142,16 @@ def _parse(raw: Dict[str, Any]) -> PyEDAConfig:
     middleware = raw.get("middleware", ["logging", "retry"])
 
     # --- per-handler overrides ---
-    handlers: Dict[str, HandlerConfig] = {}
+    known = {f.name for f in fields(HandlerConfig)}
+    handlers: Dict[str, Dict[str, Any]] = {}
     for name, cfg in raw.get("handlers", {}).items():
-        handlers[name] = _parse_handler_cfg(cfg or {})
+        override = dict(cfg or {})
+        unknown = set(override) - known
+        if unknown:
+            raise ConfigError(
+                f"Unknown option(s) for handler '{name}': {sorted(unknown)}"
+            )
+        handlers[name] = override
 
     return PyEDAConfig(
         bus=bus,

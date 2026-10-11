@@ -57,8 +57,8 @@ asyncio.Queue  ──►  Worker (asyncio task, one per handler)
                Middleware Pipeline
                ┌─────────────────────┐
                │  logging_middleware │  ← structured log lines
-               │  timeout_middleware │  ← per-handler deadline
                │  retry_middleware   │  ← exponential back-off
+               │  timeout_middleware │  ← deadline for each attempt
                │  ─────────────────  │
                │  handler_fn(event)  │  ← your async function
                └─────────────────────┘
@@ -142,8 +142,13 @@ async def log_download_to_analytics(event): ...
 ```python
 @on("dead.video.downloaded", bus=bus)
 async def on_download_failed(event):
-    await alert_team(event)
+    failure = event.metadata["dead_letter"]
+    # {"handler": "extract_audio", "error": "...", "error_type": "RuntimeError", "attempts": 3}
+    await alert_team(event, failure["error"])
 ```
+
+A dead-letter handler receives the original event. If it fails itself, the
+failure is logged and counted but not dead-lettered again.
 
 ---
 
@@ -156,6 +161,7 @@ bus:
   backend: memory        # "memory" | "sqlite"
   queue_size: 1000
   journal_path: .pyeda/journal.db
+  shutdown_timeout_s: 30.0   # how long stop() waits for running handlers; null = forever
 
 ui:
   enabled: true
@@ -167,7 +173,7 @@ defaults:
   retry_attempts: 3
   retry_delay_s: 1.0
   retry_backoff: exponential   # "fixed" | "exponential"
-  timeout_s: null
+  timeout_s: null              # deadline for each attempt
 
 middleware:
   - logging
@@ -278,6 +284,14 @@ bus:
 - Events are written to the journal **before** being queued.
 - On startup, any `pending` events (not yet delivered when the process died) are **replayed automatically**.
 - Delivered events are marked `delivered`; failed-final events are marked `dead`.
+- Replayed handlers run again from the start, so they should be safe to repeat.
+
+## Shutdown
+
+`await bus.stop()` waits for queued and running handlers, and for any events
+they emit, for up to `bus.shutdown_timeout_s` seconds (or `stop(timeout=...)`).
+Handlers still running after that are cancelled; with the SQLite backend their
+events stay `pending` and are replayed on the next start.
 
 ---
 

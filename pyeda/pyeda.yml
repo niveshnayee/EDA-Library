@@ -8,6 +8,7 @@ bus:
   backend: memory
   queue_size: 1000
   journal_path: .pyeda/journal.db   # only used when backend=sqlite
+  shutdown_timeout_s: 30.0          # how long stop() waits for running handlers; null = forever
 
 ui:
   enabled: true
@@ -20,7 +21,7 @@ defaults:
   retry_attempts: 3        # total attempts (1 = no retry)
   retry_delay_s: 1.0       # base delay between retries
   retry_backoff: exponential   # "fixed" or "exponential"
-  timeout_s: null          # null = no timeout; e.g. 30.0 for 30s
+  timeout_s: null          # per-attempt deadline; null = no timeout; e.g. 30.0 for 30s
 
 middleware:
   - logging    # structured log lines for every dispatch

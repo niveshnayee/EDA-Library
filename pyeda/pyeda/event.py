@@ -66,7 +66,9 @@ class BaseEvent:
         return clone
 
     def to_dict(self) -> Dict[str, Any]:
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+        data: Dict[str, Any] = {"event_name": self.name}
+        data.update({f.name: getattr(self, f.name) for f in fields(self)})
+        return data
 
     def __repr__(self) -> str:
         payload = {
