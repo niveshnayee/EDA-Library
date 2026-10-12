@@ -466,7 +466,7 @@ async def start_ui(bus: "EventBus") -> None:
                         await client.send_str(payload)
                     except Exception:
                         dead.add(client)
-                _clients -= dead
+                _clients.difference_update(dead)
             except asyncio.CancelledError:
                 break
             except Exception as exc:

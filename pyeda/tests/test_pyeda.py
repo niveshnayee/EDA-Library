@@ -369,6 +369,43 @@ async def test_pending_events_are_replayed_after_restart(tmp_path):
     assert replayed == ["v1"]
 
 
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_dashboard_pushes_updates_to_connected_clients():
+    aiohttp = pytest.importorskip("aiohttp")
+    import socket
+    from pyeda.ui import start_ui
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    b = EventBus.from_config({"ui": {"port": port}})
+    Ev = Event.define("test.dashboard", ["x"])
+
+    @on("test.dashboard", bus=b)
+    async def noop(ev): pass
+
+    await b.start()
+    await start_ui(b)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(f"http://127.0.0.1:{port}/ws") as ws:
+                first = await ws.receive_json(timeout=3)     # snapshot on connect
+                assert first["handlers"] == {}
+                await b.emit(Ev(x=1))
+                pushed = await ws.receive_json(timeout=3)    # sent by the push loop
+                while not pushed["handlers"]:
+                    pushed = await ws.receive_json(timeout=3)
+                assert pushed["handlers"]["noop@test.dashboard"]["success"] == 1
+    finally:
+        for task in asyncio.all_tasks():
+            if task.get_name() == "pyeda.ui.push":
+                task.cancel()
+        await b.stop()
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 def test_load_config_from_dict():
